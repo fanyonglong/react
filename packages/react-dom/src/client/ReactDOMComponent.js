@@ -824,10 +824,7 @@ export function diffProperties(
         // inserted already.
       }
     } else if (propKey === CHILDREN) {
-      if (
-        lastProp !== nextProp &&
-        (typeof nextProp === 'string' || typeof nextProp === 'number')
-      ) {
+      if (typeof nextProp === 'string' || typeof nextProp === 'number') {
         (updatePayload = updatePayload || []).push(propKey, '' + nextProp);
       }
     } else if (
@@ -1358,10 +1355,6 @@ export function listenToEventResponderEventTypes(
       const targetEventType = isPassive
         ? eventType
         : eventType.substring(0, eventType.length - 7);
-      // We don't listen to this as we actually emulate it in the host config
-      if (targetEventType === 'beforeblur') {
-        continue;
-      }
       if (!listenerMap.has(eventKey)) {
         if (isPassive) {
           const activeKey = targetEventType + '_active';

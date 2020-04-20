@@ -7,4 +7,4 @@
  * @flow
  */
 
-export * from './src/unstable-native-dependencies/ReactDOMUnstableNativeDependencies';
+export * from './src/dom/DeprecatedFocus';

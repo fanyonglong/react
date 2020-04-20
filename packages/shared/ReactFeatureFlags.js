@@ -11,6 +11,10 @@
 // This prevents e.g. <img src=""> from making an unnecessar HTTP request for certain browsers.
 export const enableFilterEmptyStringAttributesDOM = false;
 
+// Adds verbose console logging for e.g. state updates, suspense, and work loop stuff.
+// Intended to enable React core members to more easily debug scheduling issues in DEV builds.
+export const enableDebugTracing = false;
+
 // Helps identify side effects in render-phase lifecycle hooks and setState
 // reducers by double invoking them in Strict Mode.
 export const debugRenderPhaseSideEffectsForStrictMode = __DEV__;
@@ -61,10 +65,6 @@ export const enableUseEventAPI = false;
 // We will enforce mocking scheduler with scheduler/unstable_mock at some point. (v17?)
 // Till then, we warn about the missing mock, but still fallback to a legacy mode compatible version
 export const warnAboutUnmockedScheduler = false;
-
-// For tests, we flush suspense fallbacks in an act scope;
-// *except* in some of our own tests, where we test incremental loading states.
-export const flushSuspenseFallbacksInTests = true;
 
 // Add a callback property to suspense to notify which promises are currently
 // in the update queue. This allows reporting and tracing of what is causing

@@ -16,7 +16,6 @@ const dynamicFeatureFlags: DynamicFeatureFlags = require('ReactFeatureFlags');
 
 export const {
   debugRenderPhaseSideEffectsForStrictMode,
-  disableModulePatternComponents,
   disableInputAttributeSyncing,
   enableTrustedTypesIntegration,
   disableSchedulerTimeoutBasedOnReactExpirationTime,
@@ -26,6 +25,7 @@ export const {
   enableModernEventSystem,
   enableFilterEmptyStringAttributesDOM,
   enableLegacyFBSupport,
+  enableDebugTracing,
 } = dynamicFeatureFlags;
 
 // On WWW, __EXPERIMENTAL__ is used for a new modern build.
@@ -52,6 +52,8 @@ export const enableBlocksAPI = true;
 
 export const disableJavaScriptURLs = true;
 
+export const disableModulePatternComponents = true;
+
 export const enableDeprecatedFlareAPI = true;
 
 export const enableFundamentalAPI = false;
@@ -63,8 +65,6 @@ export const enableUseEventAPI = true;
 export const warnAboutUnmockedScheduler = true;
 
 export const enableSuspenseCallback = true;
-
-export const flushSuspenseFallbacksInTests = true;
 
 export const disableTextareaChildren = __EXPERIMENTAL__;
 

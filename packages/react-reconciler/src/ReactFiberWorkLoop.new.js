@@ -7,7 +7,7 @@
  * @flow
  */
 
-import type {Wakeable} from 'shared/ReactTypes';
+import type {Thenable, Wakeable} from 'shared/ReactTypes';
 import type {Fiber, FiberRoot} from './ReactInternalTypes';
 import type {ExpirationTime} from './ReactFiberExpirationTime.new';
 import type {ReactPriorityLevel} from './ReactInternalTypes';
@@ -26,8 +26,8 @@ import {
   enableProfilerCommitHooks,
   enableSchedulerTracing,
   warnAboutUnmockedScheduler,
-  flushSuspenseFallbacksInTests,
   disableSchedulerTimeoutBasedOnReactExpirationTime,
+  enableDebugTracing,
 } from 'shared/ReactFeatureFlags';
 import ReactSharedInternals from 'shared/ReactSharedInternals';
 import invariant from 'shared/invariant';
@@ -49,6 +49,16 @@ import {
   flushSyncCallbackQueue,
   scheduleSyncCallback,
 } from './SchedulerWithReactIntegration.new';
+import {
+  logCommitStarted,
+  logCommitStopped,
+  logLayoutEffectsStarted,
+  logLayoutEffectsStopped,
+  logPassiveEffectsStarted,
+  logPassiveEffectsStopped,
+  logRenderStarted,
+  logRenderStopped,
+} from './DebugTracing';
 
 // The scheduler is imported here *only* to detect whether it's been mocked
 import * as Scheduler from 'scheduler';
@@ -106,6 +116,7 @@ import {
   Snapshot,
   Callback,
   Passive,
+  PassiveUnmountPendingDev,
   Incomplete,
   HostEffectMask,
   Hydrating,
@@ -179,6 +190,9 @@ import {
   clearCaughtError,
 } from 'shared/ReactErrorUtils';
 import {onCommitRoot} from './ReactFiberDevToolsHook.new';
+
+// Used by `act`
+import enqueueTask from 'shared/enqueueTask';
 
 const ceil = Math.ceil;
 
@@ -374,6 +388,29 @@ export function computeExpirationForFiber(
   }
 
   return expirationTime;
+}
+
+export function priorityLevelToLabel(
+  priorityLevel: ReactPriorityLevel,
+): string {
+  if (__DEV__ && enableDebugTracing) {
+    switch (priorityLevel) {
+      case ImmediatePriority:
+        return 'immediate';
+      case UserBlockingPriority:
+        return 'user-blocking';
+      case NormalPriority:
+        return 'normal';
+      case LowPriority:
+        return 'low';
+      case IdlePriority:
+        return 'idle';
+      default:
+        return 'other';
+    }
+  } else {
+    return '';
+  }
 }
 
 export function scheduleUpdateOnFiber(
@@ -739,11 +776,7 @@ function finishConcurrentRender(
       if (
         hasNotProcessedNewUpdates &&
         // do not delay if we're inside an act() scope
-        !(
-          __DEV__ &&
-          flushSuspenseFallbacksInTests &&
-          IsThisRendererActing.current
-        )
+        !shouldForceFlushFallbacksInDEV()
       ) {
         // If we have not processed any new updates during this pass, then
         // this is either a retry of an existing fallback state or a
@@ -802,11 +835,7 @@ function finishConcurrentRender(
 
       if (
         // do not delay if we're inside an act() scope
-        !(
-          __DEV__ &&
-          flushSuspenseFallbacksInTests &&
-          IsThisRendererActing.current
-        )
+        !shouldForceFlushFallbacksInDEV()
       ) {
         // We're suspended in a state that should be avoided. We'll try to
         // avoid committing it for as long as the timeouts let us.
@@ -878,11 +907,7 @@ function finishConcurrentRender(
       // The work completed. Ready to commit.
       if (
         // do not delay if we're inside an act() scope
-        !(
-          __DEV__ &&
-          flushSuspenseFallbacksInTests &&
-          IsThisRendererActing.current
-        ) &&
+        !shouldForceFlushFallbacksInDEV() &&
         workInProgressRootLatestProcessedEventTime !== Sync &&
         workInProgressRootCanSuspendUsingConfig !== null
       ) {
@@ -1396,6 +1421,15 @@ function renderRootSync(root, expirationTime) {
   }
 
   const prevInteractions = pushInteractions(root);
+
+  if (__DEV__) {
+    if (enableDebugTracing) {
+      const priorityLevel = getCurrentPriorityLevel();
+      const label = priorityLevelToLabel(priorityLevel);
+      logRenderStarted(label);
+    }
+  }
+
   do {
     try {
       workLoopSync();
@@ -1419,6 +1453,12 @@ function renderRootSync(root, expirationTime) {
       'Cannot commit an incomplete root. This error is likely caused by a ' +
         'bug in React. Please file an issue.',
     );
+  }
+
+  if (__DEV__) {
+    if (enableDebugTracing) {
+      logRenderStopped();
+    }
   }
 
   // Set this to null to indicate there's no in-progress render.
@@ -1449,6 +1489,15 @@ function renderRootConcurrent(root, expirationTime) {
   }
 
   const prevInteractions = pushInteractions(root);
+
+  if (__DEV__) {
+    if (enableDebugTracing) {
+      const priorityLevel = getCurrentPriorityLevel();
+      const label = priorityLevelToLabel(priorityLevel);
+      logRenderStarted(label);
+    }
+  }
+
   do {
     try {
       workLoopConcurrent();
@@ -1464,6 +1513,12 @@ function renderRootConcurrent(root, expirationTime) {
 
   popDispatcher(prevDispatcher);
   executionContext = prevExecutionContext;
+
+  if (__DEV__) {
+    if (enableDebugTracing) {
+      logRenderStopped();
+    }
+  }
 
   // Check if the tree has completed.
   if (workInProgress !== null) {
@@ -1732,6 +1787,12 @@ function commitRoot(root) {
 }
 
 function commitRootImpl(root, renderPriorityLevel) {
+  if (__DEV__) {
+    if (enableDebugTracing) {
+      const label = priorityLevelToLabel(renderPriorityLevel);
+      logCommitStarted(label);
+    }
+  }
   do {
     // `flushPassiveEffects` will call `flushSyncUpdateQueue` at the end, which
     // means `flushPassiveEffects` will sometimes result in additional
@@ -1751,6 +1812,11 @@ function commitRootImpl(root, renderPriorityLevel) {
   const finishedWork = root.finishedWork;
   const expirationTime = root.finishedExpirationTime;
   if (finishedWork === null) {
+    if (__DEV__) {
+      if (enableDebugTracing) {
+        logCommitStopped();
+      }
+    }
     return null;
   }
   root.finishedWork = null;
@@ -2031,6 +2097,12 @@ function commitRootImpl(root, renderPriorityLevel) {
   }
 
   if ((executionContext & LegacyUnbatchedContext) !== NoContext) {
+    if (__DEV__) {
+      if (enableDebugTracing) {
+        logCommitStopped();
+      }
+    }
+
     // This is a legacy edge case. We just committed the initial mount of
     // a ReactDOM.render-ed root inside of batchedUpdates. The commit fired
     // synchronously, but layout updates should be deferred until the end
@@ -2040,6 +2112,13 @@ function commitRootImpl(root, renderPriorityLevel) {
 
   // If layout work was scheduled, flush it now.
   flushSyncCallbackQueue();
+
+  if (__DEV__) {
+    if (enableDebugTracing) {
+      logCommitStopped();
+    }
+  }
+
   return null;
 }
 
@@ -2147,6 +2226,14 @@ function commitLayoutEffects(
   root: FiberRoot,
   committedExpirationTime: ExpirationTime,
 ) {
+  if (__DEV__) {
+    if (enableDebugTracing) {
+      const priorityLevel = getCurrentPriorityLevel();
+      const label = priorityLevelToLabel(priorityLevel);
+      logLayoutEffectsStarted(label);
+    }
+  }
+
   // TODO: Should probably move the bulk of this function to commitWork.
   while (nextEffect !== null) {
     setCurrentDebugFiberInDEV(nextEffect);
@@ -2169,6 +2256,12 @@ function commitLayoutEffects(
 
     resetCurrentDebugFiberInDEV();
     nextEffect = nextEffect.nextEffect;
+  }
+
+  if (__DEV__) {
+    if (enableDebugTracing) {
+      logLayoutEffectsStopped();
+    }
   }
 }
 
@@ -2218,6 +2311,15 @@ export function enqueuePendingPassiveHookEffectUnmount(
 ): void {
   if (runAllPassiveEffectDestroysBeforeCreates) {
     pendingPassiveHookEffectsUnmount.push(effect, fiber);
+    if (__DEV__) {
+      if (deferPassiveEffectCleanupDuringUnmount) {
+        fiber.effectTag |= PassiveUnmountPendingDev;
+        const alternate = fiber.alternate;
+        if (alternate !== null) {
+          alternate.effectTag |= PassiveUnmountPendingDev;
+        }
+      }
+    }
     if (!rootDoesHavePassiveEffects) {
       rootDoesHavePassiveEffects = true;
       scheduleCallback(NormalPriority, () => {
@@ -2249,6 +2351,14 @@ function flushPassiveEffectsImpl() {
   );
 
   if (__DEV__) {
+    if (enableDebugTracing) {
+      const priorityLevel = getCurrentPriorityLevel();
+      const label = priorityLevelToLabel(priorityLevel);
+      logPassiveEffectsStarted(label);
+    }
+  }
+
+  if (__DEV__) {
     isFlushingPassiveEffects = true;
   }
 
@@ -2272,6 +2382,17 @@ function flushPassiveEffectsImpl() {
       const fiber = ((unmountEffects[i + 1]: any): Fiber);
       const destroy = effect.destroy;
       effect.destroy = undefined;
+
+      if (__DEV__) {
+        if (deferPassiveEffectCleanupDuringUnmount) {
+          fiber.effectTag &= ~PassiveUnmountPendingDev;
+          const alternate = fiber.alternate;
+          if (alternate !== null) {
+            alternate.effectTag &= ~PassiveUnmountPendingDev;
+          }
+        }
+      }
+
       if (typeof destroy === 'function') {
         if (__DEV__) {
           setCurrentDebugFiberInDEV(fiber);
@@ -2413,6 +2534,12 @@ function flushPassiveEffectsImpl() {
 
   if (__DEV__) {
     isFlushingPassiveEffects = false;
+  }
+
+  if (__DEV__) {
+    if (enableDebugTracing) {
+      logPassiveEffectsStopped();
+    }
   }
 
   executionContext = prevExecutionContext;
@@ -2745,7 +2872,7 @@ function warnAboutUpdateOnUnmountedFiberInDEV(fiber) {
     ) {
       // If there are pending passive effects unmounts for this Fiber,
       // we can assume that they would have prevented this update.
-      if (pendingPassiveHookEffectsUnmount.indexOf(fiber) >= 0) {
+      if ((fiber.effectTag & PassiveUnmountPendingDev) !== NoEffect) {
         return;
       }
     }
@@ -3195,5 +3322,229 @@ function finishPendingInteractions(root, committedExpirationTime) {
         }
       },
     );
+  }
+}
+
+// `act` testing API
+//
+// TODO: This is mostly a copy-paste from the legacy `act`, which does not have
+// access to the same internals that we do here. Some trade offs in the
+// implementation no longer make sense.
+
+let isFlushingAct = false;
+let isInsideThisAct = false;
+
+// TODO: Yes, this is confusing. See above comment. We'll refactor it.
+function shouldForceFlushFallbacksInDEV() {
+  if (!__DEV__) {
+    // Never force flush in production. This function should get stripped out.
+    return false;
+  }
+  // `IsThisRendererActing.current` is used by ReactTestUtils version of `act`.
+  if (IsThisRendererActing.current) {
+    // `isInsideAct` is only used by the reconciler implementation of `act`.
+    // We don't want to flush suspense fallbacks until the end.
+    return !isInsideThisAct;
+  }
+  // Flush callbacks at the end.
+  return isFlushingAct;
+}
+
+const flushMockScheduler = Scheduler.unstable_flushAllWithoutAsserting;
+const isSchedulerMocked = typeof flushMockScheduler === 'function';
+
+// Returns whether additional work was scheduled. Caller should keep flushing
+// until there's no work left.
+function flushActWork(): boolean {
+  if (flushMockScheduler !== undefined) {
+    const prevIsFlushing = isFlushingAct;
+    isFlushingAct = true;
+    try {
+      return flushMockScheduler();
+    } finally {
+      isFlushingAct = prevIsFlushing;
+    }
+  } else {
+    // No mock scheduler available. However, the only type of pending work is
+    // passive effects, which we control. So we can flush that.
+    const prevIsFlushing = isFlushingAct;
+    isFlushingAct = true;
+    try {
+      let didFlushWork = false;
+      while (flushPassiveEffects()) {
+        didFlushWork = true;
+      }
+      return didFlushWork;
+    } finally {
+      isFlushingAct = prevIsFlushing;
+    }
+  }
+}
+
+function flushWorkAndMicroTasks(onDone: (err: ?Error) => void) {
+  try {
+    flushActWork();
+    enqueueTask(() => {
+      if (flushActWork()) {
+        flushWorkAndMicroTasks(onDone);
+      } else {
+        onDone();
+      }
+    });
+  } catch (err) {
+    onDone(err);
+  }
+}
+
+// we track the 'depth' of the act() calls with this counter,
+// so we can tell if any async act() calls try to run in parallel.
+
+let actingUpdatesScopeDepth = 0;
+let didWarnAboutUsingActInProd = false;
+
+export function act(callback: () => Thenable<mixed>): Thenable<void> {
+  if (!__DEV__) {
+    if (didWarnAboutUsingActInProd === false) {
+      didWarnAboutUsingActInProd = true;
+      // eslint-disable-next-line react-internal/no-production-logging
+      console.error(
+        'act(...) is not supported in production builds of React, and might not behave as expected.',
+      );
+    }
+  }
+
+  const previousActingUpdatesScopeDepth = actingUpdatesScopeDepth;
+  actingUpdatesScopeDepth++;
+
+  const previousIsSomeRendererActing = IsSomeRendererActing.current;
+  const previousIsThisRendererActing = IsThisRendererActing.current;
+  const previousIsInsideThisAct = isInsideThisAct;
+  IsSomeRendererActing.current = true;
+  IsThisRendererActing.current = true;
+  isInsideThisAct = true;
+
+  function onDone() {
+    actingUpdatesScopeDepth--;
+    IsSomeRendererActing.current = previousIsSomeRendererActing;
+    IsThisRendererActing.current = previousIsThisRendererActing;
+    isInsideThisAct = previousIsInsideThisAct;
+    if (__DEV__) {
+      if (actingUpdatesScopeDepth > previousActingUpdatesScopeDepth) {
+        // if it's _less than_ previousActingUpdatesScopeDepth, then we can assume the 'other' one has warned
+        console.error(
+          'You seem to have overlapping act() calls, this is not supported. ' +
+            'Be sure to await previous act() calls before making a new one. ',
+        );
+      }
+    }
+  }
+
+  let result;
+  try {
+    result = batchedUpdates(callback);
+  } catch (error) {
+    // on sync errors, we still want to 'cleanup' and decrement actingUpdatesScopeDepth
+    onDone();
+    throw error;
+  }
+
+  if (
+    result !== null &&
+    typeof result === 'object' &&
+    typeof result.then === 'function'
+  ) {
+    // setup a boolean that gets set to true only
+    // once this act() call is await-ed
+    let called = false;
+    if (__DEV__) {
+      if (typeof Promise !== 'undefined') {
+        //eslint-disable-next-line no-undef
+        Promise.resolve()
+          .then(() => {})
+          .then(() => {
+            if (called === false) {
+              console.error(
+                'You called act(async () => ...) without await. ' +
+                  'This could lead to unexpected testing behaviour, interleaving multiple act ' +
+                  'calls and mixing their scopes. You should - await act(async () => ...);',
+              );
+            }
+          });
+      }
+    }
+
+    // in the async case, the returned thenable runs the callback, flushes
+    // effects and  microtasks in a loop until flushPassiveEffects() === false,
+    // and cleans up
+    return {
+      then(resolve, reject) {
+        called = true;
+        result.then(
+          () => {
+            if (
+              actingUpdatesScopeDepth > 1 ||
+              (isSchedulerMocked === true &&
+                previousIsSomeRendererActing === true)
+            ) {
+              onDone();
+              resolve();
+              return;
+            }
+            // we're about to exit the act() scope,
+            // now's the time to flush tasks/effects
+            flushWorkAndMicroTasks((err: ?Error) => {
+              onDone();
+              if (err) {
+                reject(err);
+              } else {
+                resolve();
+              }
+            });
+          },
+          err => {
+            onDone();
+            reject(err);
+          },
+        );
+      },
+    };
+  } else {
+    if (__DEV__) {
+      if (result !== undefined) {
+        console.error(
+          'The callback passed to act(...) function ' +
+            'must return undefined, or a Promise. You returned %s',
+          result,
+        );
+      }
+    }
+
+    // flush effects until none remain, and cleanup
+    try {
+      if (
+        actingUpdatesScopeDepth === 1 &&
+        (isSchedulerMocked === false || previousIsSomeRendererActing === false)
+      ) {
+        // we're about to exit the act() scope,
+        // now's the time to flush effects
+        flushActWork();
+      }
+      onDone();
+    } catch (err) {
+      onDone();
+      throw err;
+    }
+
+    // in the sync case, the returned thenable only warns *if* await-ed
+    return {
+      then(resolve) {
+        if (__DEV__) {
+          console.error(
+            'Do not await the result of calling act(...) with sync logic, it is not a Promise.',
+          );
+        }
+        resolve();
+      },
+    };
   }
 }
