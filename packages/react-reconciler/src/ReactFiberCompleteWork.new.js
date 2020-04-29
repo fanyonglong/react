@@ -8,7 +8,7 @@
  */
 
 import type {Fiber} from './ReactInternalTypes';
-import type {ExpirationTime} from './ReactFiberExpirationTime.new';
+import type {ExpirationTimeOpaque} from './ReactFiberExpirationTime.new';
 import type {
   ReactFundamentalComponentInstance,
   ReactScopeInstance,
@@ -26,6 +26,8 @@ import type {
   SuspenseListRenderState,
 } from './ReactFiberSuspenseComponent.new';
 import type {SuspenseContext} from './ReactFiberSuspenseContext.new';
+import type {OffscreenState} from './ReactFiberOffscreenComponent';
+
 import {resetWorkInProgressVersions as resetMutableSourceWorkInProgressVersions} from './ReactMutableSource.new';
 
 import {now} from './SchedulerWithReactIntegration.new';
@@ -53,6 +55,7 @@ import {
   FundamentalComponent,
   ScopeComponent,
   Block,
+  OffscreenComponent,
 } from './ReactWorkTags';
 import {NoMode, BlockingMode} from './ReactTypeOfMode';
 import {
@@ -60,7 +63,7 @@ import {
   Update,
   NoEffect,
   DidCapture,
-  Deletion,
+  Snapshot,
 } from './ReactSideEffectTags';
 import invariant from 'shared/invariant';
 
@@ -82,6 +85,7 @@ import {
   mountFundamentalComponent,
   cloneFundamentalInstance,
   shouldUpdateFundamentalComponent,
+  preparePortalMount,
 } from './ReactFiberHostConfig';
 import {
   getRootHostContainer,
@@ -129,7 +133,7 @@ import {
   renderHasNotSuspendedYet,
 } from './ReactFiberWorkLoop.new';
 import {createFundamentalStateInstance} from './ReactFiberFundamental.new';
-import {Never} from './ReactFiberExpirationTime.new';
+import {Never, isSameOrHigherPriority} from './ReactFiberExpirationTime.new';
 import {resetChildFibers} from './ReactChildFiber.new';
 import {updateDeprecatedEventListeners} from './ReactFiberDeprecatedEvents.new';
 import {createScopeMethods} from './ReactFiberScope.new';
@@ -637,7 +641,7 @@ function cutOffTailIfNeeded(
 function completeWork(
   current: Fiber | null,
   workInProgress: Fiber,
-  renderExpirationTime: ExpirationTime,
+  renderExpirationTime: ExpirationTimeOpaque,
 ): Fiber | null {
   const newProps = workInProgress.pendingProps;
 
@@ -677,6 +681,14 @@ function completeWork(
           // If we hydrated, then we'll need to schedule an update for
           // the commit side-effects on the root.
           markUpdate(workInProgress);
+        } else if (!fiberRoot.hydrate) {
+          // Schedule an effect to clear this container at the start of the next commit.
+          // This handles the case of React rendering into a container with previous children.
+          // It's also safe to do for updates too, because current.child would only be null
+          // if the previous render was null (so the the container would already be empty).
+          //
+          // The additional root.hydrate check is required for hydration in legacy mode with no fallback.
+          workInProgress.effectTag |= Snapshot;
         }
       }
       updateHostContainer(workInProgress);
@@ -844,7 +856,7 @@ function completeWork(
             );
             prepareToHydrateHostSuspenseInstance(workInProgress);
             if (enableSchedulerTracing) {
-              markSpawnedWork(Never);
+              markSpawnedWork((Never: ExpirationTimeOpaque));
             }
             return null;
           } else {
@@ -869,7 +881,7 @@ function completeWork(
 
       if ((workInProgress.effectTag & DidCapture) !== NoEffect) {
         // Something suspended. Re-render with the fallback children.
-        workInProgress.expirationTime = renderExpirationTime;
+        workInProgress.expirationTime_opaque = renderExpirationTime;
         // Do not reset the effect list.
         return workInProgress;
       }
@@ -883,26 +895,6 @@ function completeWork(
       } else {
         const prevState: null | SuspenseState = current.memoizedState;
         prevDidTimeout = prevState !== null;
-        if (!nextDidTimeout && prevState !== null) {
-          // We just switched from the fallback to the normal children.
-          // Delete the fallback.
-          // TODO: Would it be better to store the fallback fragment on
-          // the stateNode during the begin phase?
-          const currentFallbackChild: Fiber | null = (current.child: any)
-            .sibling;
-          if (currentFallbackChild !== null) {
-            // Deletions go at the beginning of the return fiber's effect list
-            const first = workInProgress.firstEffect;
-            if (first !== null) {
-              workInProgress.firstEffect = currentFallbackChild;
-              currentFallbackChild.nextEffect = first;
-            } else {
-              workInProgress.firstEffect = workInProgress.lastEffect = currentFallbackChild;
-              currentFallbackChild.nextEffect = null;
-            }
-            currentFallbackChild.effectTag = Deletion;
-          }
-        }
       }
 
       if (nextDidTimeout && !prevDidTimeout) {
@@ -973,6 +965,9 @@ function completeWork(
     case HostPortal:
       popHostContainer(workInProgress);
       updateHostContainer(workInProgress);
+      if (current === null) {
+        preparePortalMount(workInProgress.stateNode.containerInfo);
+      }
       return null;
     case ContextProvider:
       // Pop provider fiber
@@ -1115,7 +1110,10 @@ function completeWork(
             // the expiration.
             now() * 2 - renderState.renderingStartTime >
               renderState.tailExpiration &&
-            renderExpirationTime > Never
+            !isSameOrHigherPriority(
+              (Never: ExpirationTimeOpaque),
+              renderExpirationTime,
+            )
           ) {
             // We have now passed our CPU deadline and we'll just give up further
             // attempts to render the main content and only render fallbacks.
@@ -1130,11 +1128,9 @@ function completeWork(
             // them, then they really have the same priority as this render.
             // So we'll pick it back up the very next render pass once we've had
             // an opportunity to yield for paint.
-
-            const nextPriority = renderExpirationTime - 1;
-            workInProgress.expirationTime = workInProgress.childExpirationTime = nextPriority;
+            workInProgress.expirationTime_opaque = renderExpirationTime;
             if (enableSchedulerTracing) {
-              markSpawnedWork(nextPriority);
+              markSpawnedWork(renderExpirationTime);
             }
           }
         }
@@ -1302,6 +1298,19 @@ function completeWork(
         return null;
       }
       break;
+    case OffscreenComponent: {
+      if (current !== null) {
+        const nextState: OffscreenState | null = workInProgress.memoizedState;
+        const prevState: OffscreenState | null = current.memoizedState;
+
+        const prevIsHidden = prevState !== null;
+        const nextIsHidden = nextState !== null;
+        if (prevIsHidden !== nextIsHidden) {
+          workInProgress.effectTag |= Update;
+        }
+      }
+      return null;
+    }
   }
   invariant(
     false,

@@ -12,7 +12,7 @@ import type {DOMTopLevelEventType} from 'legacy-events/TopLevelEventTypes';
 import type {
   ElementListenerMap,
   ElementListenerMapEntry,
-} from '../events/DOMEventListenerMap';
+} from '../client/ReactDOMComponentTree';
 import type {EventSystemFlags} from './EventSystemFlags';
 import type {EventPriority, ReactScopeMethods} from 'shared/ReactTypes';
 import type {Fiber} from 'react-reconciler/src/ReactInternalTypes';
@@ -35,12 +35,7 @@ import {
   HostComponent,
 } from 'react-reconciler/src/ReactWorkTags';
 
-import {
-  addTrappedEventListener,
-  removeTrappedEventListener,
-} from './ReactDOMEventListener';
 import getEventTarget from './getEventTarget';
-import {getListenerMapForElement} from './DOMEventListenerMap';
 import {
   TOP_FOCUS,
   TOP_LOAD,
@@ -76,17 +71,28 @@ import {
   TOP_PLAYING,
   TOP_CLICK,
   TOP_SELECTION_CHANGE,
+  getRawEventName,
 } from './DOMTopLevelEventTypes';
-import {getClosestInstanceFromNode} from '../client/ReactDOMComponentTree';
+import {
+  getClosestInstanceFromNode,
+  getEventListenerMap,
+} from '../client/ReactDOMComponentTree';
 import {COMMENT_NODE} from '../shared/HTMLNodeType';
 import {batchedEventUpdates} from './ReactDOMUpdateBatching';
 import getListener from './getListener';
+import {passiveBrowserEventsSupported} from './checkPassiveEvents';
 
 import {enableLegacyFBSupport} from 'shared/ReactFeatureFlags';
 import {
   invokeGuardedCallbackAndCatchFirstError,
   rethrowCaughtError,
 } from 'shared/ReactErrorUtils';
+import {createEventListenerWrapperWithPriority} from './ReactDOMEventListener';
+import {
+  removeEventListener,
+  addEventCaptureListener,
+  addEventBubbleListener,
+} from './EventListener';
 
 const capturePhaseEvents = new Set([
   TOP_FOCUS,
@@ -219,25 +225,6 @@ function dispatchEventsForPlugins(
   dispatchEventsInBatch(syntheticEvents);
 }
 
-function shouldUpgradeListener(
-  listenerEntry: void | ElementListenerMapEntry,
-  passive: void | boolean,
-): boolean {
-  if (listenerEntry === undefined) {
-    return false;
-  }
-  // Upgrade from passive to active.
-  if (passive !== true && listenerEntry.passive) {
-    return true;
-  }
-  // Upgrade from default-active (browser default) to active.
-  if (passive === false && listenerEntry.passive === undefined) {
-    return true;
-  }
-  // Otherwise, do not upgrade
-  return false;
-}
-
 export function listenToTopLevelEvent(
   topLevelType: DOMTopLevelEventType,
   targetContainer: EventTarget,
@@ -247,43 +234,19 @@ export function listenToTopLevelEvent(
   priority?: EventPriority,
   capture?: boolean,
 ): void {
-  // If we explicitly define capture, then these are for EventTarget objects,
-  // rather than React managed DOM elements. So we need to ensure we separate
-  // capture and non-capture events. For React managed DOM nodes we only use
-  // one or the other, never both. Which one we use is determined by the the
-  // capturePhaseEvents Set (in this module) that defines if the event listener
-  // should use the capture phase – otherwise we always use the bubble phase.
-  // Finally, when we get to dispatching and accumulating event listeners, we
-  // check if the user wanted capture/bubble and emulate the behavior at that
-  // point (we call this accumulating two phase listeners).
-  const typeStr = ((topLevelType: any): string);
-  const listenerMapKey =
-    capture === undefined
-      ? topLevelType
-      : `${typeStr}_${capture ? 'capture' : 'bubble'}`;
-
   // TOP_SELECTION_CHANGE needs to be attached to the document
   // otherwise it won't capture incoming events that are only
   // triggered on the document directly.
   if (topLevelType === TOP_SELECTION_CHANGE) {
     targetContainer = (targetContainer: any).ownerDocument || targetContainer;
-    listenerMap = getListenerMapForElement(targetContainer);
+    listenerMap = getEventListenerMap(targetContainer);
   }
-  const listenerEntry = listenerMap.get(listenerMapKey);
-  const shouldUpgrade = shouldUpgradeListener(listenerEntry, passive);
-  if (listenerEntry === undefined || shouldUpgrade) {
-    const isCapturePhase =
-      capture === undefined ? capturePhaseEvents.has(topLevelType) : capture;
-    // If we should upgrade, then we need to remove the existing trapped
-    // event listener for the target container.
-    if (shouldUpgrade) {
-      removeTrappedEventListener(
-        targetContainer,
-        topLevelType,
-        isCapturePhase,
-        ((listenerEntry: any): ElementListenerMapEntry).listener,
-      );
-    }
+  const listenerEntry: ElementListenerMapEntry | void = listenerMap.get(
+    topLevelType,
+  );
+  const isCapturePhase =
+    capture === undefined ? capturePhaseEvents.has(topLevelType) : capture;
+  if (listenerEntry === undefined) {
     const listener = addTrappedEventListener(
       targetContainer,
       topLevelType,
@@ -293,7 +256,7 @@ export function listenToTopLevelEvent(
       passive,
       priority,
     );
-    listenerMap.set(listenerMapKey, {passive, listener});
+    listenerMap.set(topLevelType, {passive, listener});
   }
 }
 
@@ -301,7 +264,7 @@ export function listenToEvent(
   registrationName: string,
   rootContainerElement: Element,
 ): void {
-  const listenerMap = getListenerMapForElement(rootContainerElement);
+  const listenerMap = getEventListenerMap(rootContainerElement);
   const dependencies = registrationNameDependencies[registrationName];
 
   for (let i = 0; i < dependencies.length; i++) {
@@ -313,6 +276,77 @@ export function listenToEvent(
       PLUGIN_EVENT_SYSTEM,
     );
   }
+}
+
+function addTrappedEventListener(
+  targetContainer: EventTarget,
+  topLevelType: DOMTopLevelEventType,
+  eventSystemFlags: EventSystemFlags,
+  capture: boolean,
+  isDeferredListenerForLegacyFBSupport?: boolean,
+  passive?: boolean,
+  priority?: EventPriority,
+): any => void {
+  let listener = createEventListenerWrapperWithPriority(
+    targetContainer,
+    topLevelType,
+    eventSystemFlags,
+    priority,
+  );
+  // If passive option is not supported, then the event will be
+  // active and not passive.
+  if (passive === true && !passiveBrowserEventsSupported) {
+    passive = false;
+  }
+
+  targetContainer =
+    enableLegacyFBSupport && isDeferredListenerForLegacyFBSupport
+      ? (targetContainer: any).ownerDocument
+      : targetContainer;
+
+  const rawEventName = getRawEventName(topLevelType);
+
+  let unsubscribeListener;
+  // When legacyFBSupport is enabled, it's for when we
+  // want to add a one time event listener to a container.
+  // This should only be used with enableLegacyFBSupport
+  // due to requirement to provide compatibility with
+  // internal FB www event tooling. This works by removing
+  // the event listener as soon as it is invoked. We could
+  // also attempt to use the {once: true} param on
+  // addEventListener, but that requires support and some
+  // browsers do not support this today, and given this is
+  // to support legacy code patterns, it's likely they'll
+  // need support for such browsers.
+  if (enableLegacyFBSupport && isDeferredListenerForLegacyFBSupport) {
+    const originalListener = listener;
+    listener = function(...p) {
+      try {
+        return originalListener.apply(this, p);
+      } finally {
+        removeEventListener(
+          targetContainer,
+          rawEventName,
+          unsubscribeListener,
+          capture,
+        );
+      }
+    };
+  }
+  if (capture) {
+    unsubscribeListener = addEventCaptureListener(
+      targetContainer,
+      rawEventName,
+      listener,
+    );
+  } else {
+    unsubscribeListener = addEventBubbleListener(
+      targetContainer,
+      rawEventName,
+      listener,
+    );
+  }
+  return unsubscribeListener;
 }
 
 function willDeferLaterForLegacyFBSupport(

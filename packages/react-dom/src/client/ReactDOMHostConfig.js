@@ -64,8 +64,10 @@ import {
   enableSuspenseServerRenderer,
   enableDeprecatedFlareAPI,
   enableFundamentalAPI,
+  enableModernEventSystem,
 } from 'shared/ReactFeatureFlags';
 import {TOP_BEFORE_BLUR, TOP_AFTER_BLUR} from '../events/DOMTopLevelEventTypes';
+import {listenToEvent} from '../events/DOMModernPluginEventSystem';
 
 export type Type = string;
 export type Props = {
@@ -632,6 +634,17 @@ export function unhideTextInstance(
   textInstance.nodeValue = text;
 }
 
+export function clearContainer(container: Container): void {
+  if (container.nodeType === ELEMENT_NODE) {
+    ((container: any): Element).textContent = '';
+  } else if (container.nodeType === DOCUMENT_NODE) {
+    const body = ((container: any): Document).body;
+    if (body != null) {
+      body.textContent = '';
+    }
+  }
+}
+
 // -------------------
 //     Hydration
 // -------------------
@@ -1097,4 +1110,10 @@ export function makeOpaqueHydratingObject(
     toString: attemptToReadValue,
     valueOf: attemptToReadValue,
   };
+}
+
+export function preparePortalMount(portalInstance: Instance): void {
+  if (enableModernEventSystem) {
+    listenToEvent('onMouseEnter', portalInstance);
+  }
 }

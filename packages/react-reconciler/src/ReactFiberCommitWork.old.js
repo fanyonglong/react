@@ -111,6 +111,7 @@ import {
   commitHydratedContainer,
   commitHydratedSuspenseInstance,
   beforeRemoveInstance,
+  clearContainer,
 } from './ReactFiberHostConfig';
 import {
   captureCommitPhaseError,
@@ -293,7 +294,15 @@ function commitBeforeMutationLifeCycles(
       }
       return;
     }
-    case HostRoot:
+    case HostRoot: {
+      if (supportsMutation) {
+        if (finishedWork.effectTag & Snapshot) {
+          const root = finishedWork.stateNode;
+          clearContainer(root.containerInfo);
+        }
+      }
+      return;
+    }
     case HostComponent:
     case HostText:
     case HostPortal:
@@ -1115,7 +1124,7 @@ function detachFiber(fiber: Fiber) {
   // traversal in a later effect. See PR #16820.
   fiber.alternate = null;
   fiber.child = null;
-  fiber.dependencies = null;
+  fiber.dependencies_old = null;
   fiber.firstEffect = null;
   fiber.lastEffect = null;
   fiber.memoizedProps = null;
