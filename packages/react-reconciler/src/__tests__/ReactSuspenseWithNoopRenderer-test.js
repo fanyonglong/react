@@ -142,6 +142,25 @@ describe('ReactSuspenseWithNoopRenderer', () => {
     }
   }
 
+  // TODO: Delete this once new API exists in both forks
+  function LegacyHiddenDiv({hidden, children, ...props}) {
+    if (gate(flags => flags.new)) {
+      return (
+        <div hidden={hidden} {...props}>
+          <React.unstable_LegacyHidden mode={hidden ? 'hidden' : 'visible'}>
+            {children}
+          </React.unstable_LegacyHidden>
+        </div>
+      );
+    } else {
+      return (
+        <div hidden={hidden} {...props}>
+          {children}
+        </div>
+      );
+    }
+  }
+
   it('does not restart rendering for initial render', async () => {
     function Bar(props) {
       Scheduler.unstable_yieldValue('Bar');
@@ -2737,7 +2756,9 @@ describe('ReactSuspenseWithNoopRenderer', () => {
 
     function App() {
       const [page, setPage] = React.useState('A');
-      const [startLoading, isLoading] = React.useTransition(SUSPENSE_CONFIG);
+      const [startLoading, isLoading] = React.unstable_useTransition(
+        SUSPENSE_CONFIG,
+      );
       transitionToPage = nextPage => startLoading(() => setPage(nextPage));
       return (
         <Fragment>
@@ -2889,6 +2910,7 @@ describe('ReactSuspenseWithNoopRenderer', () => {
   });
 
   // @gate experimental
+  // @gate enableLegacyHiddenType
   it('should not render hidden content while suspended on higher pri', async () => {
     function Offscreen() {
       Scheduler.unstable_yieldValue('Offscreen');
@@ -2900,9 +2922,9 @@ describe('ReactSuspenseWithNoopRenderer', () => {
       });
       return (
         <>
-          <div hidden={true}>
+          <LegacyHiddenDiv hidden={true}>
             <Offscreen />
-          </div>
+          </LegacyHiddenDiv>
           <Suspense fallback={<Text text="Loading..." />}>
             {showContent ? <AsyncText text="A" ms={2000} /> : null}
           </Suspense>
@@ -2944,6 +2966,7 @@ describe('ReactSuspenseWithNoopRenderer', () => {
   });
 
   // @gate experimental
+  // @gate enableLegacyHiddenType
   it('should be able to unblock higher pri content before suspended hidden', async () => {
     function Offscreen() {
       Scheduler.unstable_yieldValue('Offscreen');
@@ -2955,10 +2978,10 @@ describe('ReactSuspenseWithNoopRenderer', () => {
       });
       return (
         <Suspense fallback={<Text text="Loading..." />}>
-          <div hidden={true}>
+          <LegacyHiddenDiv hidden={true}>
             <AsyncText text="A" ms={2000} />
             <Offscreen />
-          </div>
+          </LegacyHiddenDiv>
           {showContent ? <AsyncText text="A" ms={2000} /> : null}
         </Suspense>
       );
@@ -3180,18 +3203,49 @@ describe('ReactSuspenseWithNoopRenderer', () => {
         });
         setFallbackText('Still loading...');
 
-        expect(Scheduler).toFlushAndYield([
-          // First try to render the high pri update. We won't try to re-render
-          // the suspended tree during this pass, because it still has unfinished
-          // updates at a lower priority.
-          'Loading...',
+        expect(Scheduler).toFlushAndYield(
+          gate(flags =>
+            flags.new
+              ? [
+                  // First try to render the high pri update. Still suspended.
+                  'Suspend! [C]',
+                  'Loading...',
 
-          // Now try the suspended update again. It's still suspended.
-          'Suspend! [C]',
+                  // In the expiration times model, once the high pri update
+                  // suspends, we can't be sure if there's additional work at a
+                  // lower priority that might unblock the tree. We do know that
+                  // there's a lower priority update *somehwere* in the entire
+                  // root, though (the update to the fallback). So we try
+                  // rendering one more time, just in case.
+                  // TODO: We shouldn't need to do this with lanes, because we
+                  // always know exactly which lanes have pending work in
+                  // each tree.
+                  'Suspend! [C]',
 
-          // Then complete the update to the fallback.
-          'Still loading...',
-        ]);
+                  // Then complete the update to the fallback.
+                  'Still loading...',
+                ]
+              : [
+                  // In the old reconciler, we don't attempt to unhdie the
+                  // Suspense boundary at high priority. Instead, we bailout,
+                  // then try again at the original priority that the component
+                  // suspended. This is mostly an implementation compromise,
+                  // though there are some advantages to this behavior, because
+                  // attempt to unhide could slow down the rest of the update.
+                  //
+                  // Render that only includes the fallback, since we bailed
+                  // out on the primary tree.
+                  'Loading...',
+
+                  // Now try the suspended update again at the original
+                  // priority. It's still suspended.
+                  'Suspend! [C]',
+
+                  // Then complete the update to the fallback.
+                  'Still loading...',
+                ],
+          ),
+        );
         expect(root).toMatchRenderedOutput(
           <>
             <span hidden={true} prop="A" />
@@ -3466,17 +3520,34 @@ describe('ReactSuspenseWithNoopRenderer', () => {
           root.render(<Parent step={1} />);
         });
       });
+
       // Only the outer part can update. The inner part should still show a
       // fallback because we haven't finished loading B yet. Otherwise, the
       // inner text would be inconsistent with the outer text.
-      expect(Scheduler).toHaveYielded([
-        'Outer text: B',
-        'Outer step: 1',
-        'Loading...',
-
-        'Suspend! [Inner text: B]',
-        'Inner step: 1',
-      ]);
+      expect(Scheduler).toHaveYielded(
+        gate(flags =>
+          flags.new
+            ? [
+                'Outer text: B',
+                'Outer step: 1',
+                'Suspend! [Inner text: B]',
+                'Inner step: 1',
+                'Loading...',
+              ]
+            : [
+                // In the old reconciler, we first complete the outside of the
+                // Suspense boundary, then attempt to unhide it in a separate
+                // render at the original priority at which it suspended.
+                // First render:
+                'Outer text: B',
+                'Outer step: 1',
+                'Loading...',
+                // Second render:
+                'Suspend! [Inner text: B]',
+                'Inner step: 1',
+              ],
+        ),
+      );
       expect(root).toMatchRenderedOutput(
         <>
           <span prop="Outer text: B" />
@@ -3595,15 +3666,23 @@ describe('ReactSuspenseWithNoopRenderer', () => {
       });
     });
 
-    expect(Scheduler).toHaveYielded([
-      // First the outer part of the tree updates, at high pri.
-      'Outer: B1',
-      'Loading...',
-
-      // Then we retry the boundary.
-      'Inner: B1',
-      'Commit Child',
-    ]);
+    expect(Scheduler).toHaveYielded(
+      gate(flags =>
+        flags.new
+          ? ['Outer: B1', 'Inner: B1', 'Commit Child']
+          : [
+              // In the old reconciler, we first complete the outside of the
+              // Suspense boundary, then attempt to unhide it in a separate
+              // render at the original priority at which it suspended.
+              // First render:
+              'Outer: B1',
+              'Loading...',
+              // Second render:
+              'Inner: B1',
+              'Commit Child',
+            ],
+      ),
+    );
     expect(root).toMatchRenderedOutput(
       <>
         <span prop="Outer: B1" />
@@ -3662,7 +3741,7 @@ describe('ReactSuspenseWithNoopRenderer', () => {
 
   // @gate experimental
   it('regression: ping at high priority causes update to be dropped', async () => {
-    const {useState, useTransition} = React;
+    const {useState, unstable_useTransition: useTransition} = React;
 
     let setTextA;
     function A() {
@@ -3780,10 +3859,10 @@ describe('ReactSuspenseWithNoopRenderer', () => {
     let setTextWithLongTransition;
 
     function App() {
-      const [startShortTransition, isPending1] = React.useTransition({
+      const [startShortTransition, isPending1] = React.unstable_useTransition({
         timeoutMs: 5000,
       });
-      const [startLongTransition, isPending2] = React.useTransition({
+      const [startLongTransition, isPending2] = React.unstable_useTransition({
         timeoutMs: 30000,
       });
       const isPending = isPending1 || isPending2;

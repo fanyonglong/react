@@ -69,6 +69,7 @@ import {
   warnAboutDefaultPropsOnFunctionComponents,
   enableScopeAPI,
   enableBlocksAPI,
+  warnAboutDOMHiddenAttribute,
 } from 'shared/ReactFeatureFlags';
 import invariant from 'shared/invariant';
 import shallowEqual from 'shared/shallowEqual';
@@ -180,6 +181,7 @@ import {
   markUnprocessedUpdateTime,
   getWorkInProgressRoot,
 } from './ReactFiberWorkLoop.old';
+import {unstable_wrap as Schedule_tracing_wrap} from 'scheduler/tracing';
 
 import {disableLogs, reenableLogs} from 'shared/ConsolePatchingDev';
 
@@ -1098,6 +1100,21 @@ function updateHostComponent(current, workInProgress, renderExpirationTime) {
 
   markRef(current, workInProgress);
 
+  if (__DEV__) {
+    if (
+      warnAboutDOMHiddenAttribute &&
+      (workInProgress.mode & ConcurrentMode) !== NoMode &&
+      nextProps.hasOwnProperty('hidden')
+    ) {
+      // This warning will not be user visible. Only exists so React Core team
+      // can find existing callers and migrate them to the new API.
+      console.error(
+        'Detected use of DOM `hidden` attribute. Should migrate to new API. ' +
+          '(owner: React Core)',
+      );
+    }
+  }
+
   // Check the host config to see if the children are offscreen/hidden.
   if (
     workInProgress.mode & ConcurrentMode &&
@@ -1109,6 +1126,8 @@ function updateHostComponent(current, workInProgress, renderExpirationTime) {
     }
     // Schedule this fiber to re-render at offscreen priority. Then bailout.
     workInProgress.expirationTime = workInProgress.childExpirationTime = Never;
+    // We should never render the children of a dehydrated boundary until we
+    // upgrade it. We return null instead of bailoutOnAlreadyFinishedWork.
     return null;
   }
 
@@ -2303,10 +2322,11 @@ function updateDehydratedSuspenseComponent(
     // Leave the child in place. I.e. the dehydrated fragment.
     workInProgress.child = current.child;
     // Register a callback to retry this boundary once the server has sent the result.
-    registerSuspenseInstanceRetry(
-      suspenseInstance,
-      retryDehydratedSuspenseBoundary.bind(null, current),
-    );
+    let retry = retryDehydratedSuspenseBoundary.bind(null, current);
+    if (enableSchedulerTracing) {
+      retry = Schedule_tracing_wrap(retry);
+    }
+    registerSuspenseInstanceRetry(suspenseInstance, retry);
     return null;
   } else {
     // This is the first attempt.
@@ -3126,7 +3146,8 @@ function beginWork(
                 // been unsuspended it has committed as a resolved Suspense component.
                 // If it needs to be retried, it should have work scheduled on it.
                 workInProgress.effectTag |= DidCapture;
-                break;
+
+                return null;
               }
             }
 

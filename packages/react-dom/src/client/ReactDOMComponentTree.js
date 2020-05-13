@@ -8,6 +8,8 @@
  */
 
 import type {Fiber} from 'react-reconciler/src/ReactInternalTypes';
+import type {ReactScopeInstance} from 'shared/ReactTypes';
+import type {ReactDOMEventHandleListener} from '../shared/ReactDOMTypes';
 import type {
   Container,
   TextInstance,
@@ -23,9 +25,11 @@ import {
   HostRoot,
   SuspenseComponent,
 } from 'react-reconciler/src/ReactWorkTags';
-import invariant from 'shared/invariant';
 
 import {getParentSuspenseInstance} from './ReactDOMHostConfig';
+
+import invariant from 'shared/invariant';
+import {enableScopeAPI} from 'shared/ReactFeatureFlags';
 
 const randomKey = Math.random()
   .toString(36)
@@ -34,6 +38,7 @@ const internalInstanceKey = '__reactFiber$' + randomKey;
 const internalPropsKey = '__reactProps$' + randomKey;
 const internalContainerInstanceKey = '__reactContainer$' + randomKey;
 const internalEventHandlersKey = '__reactEvents$' + randomKey;
+const internalEventHandlerListenersKey = '__reactListeners$' + randomKey;
 
 export type ElementListenerMap = Map<
   DOMTopLevelEventType | string,
@@ -47,7 +52,7 @@ export type ElementListenerMapEntry = {
 
 export function precacheFiberNode(
   hostInst: Fiber,
-  node: Instance | TextInstance | SuspenseInstance,
+  node: Instance | TextInstance | SuspenseInstance | ReactScopeInstance,
 ): void {
   (node: any)[internalInstanceKey] = hostInst;
 }
@@ -204,4 +209,26 @@ export function getEventListenerMap(node: EventTarget): ElementListenerMap {
     elementListenerMap = (node: any)[internalEventHandlersKey] = new Map();
   }
   return elementListenerMap;
+}
+
+export function getFiberFromScopeInstance(
+  scope: ReactScopeInstance,
+): null | Fiber {
+  if (enableScopeAPI) {
+    return (scope: any)[internalInstanceKey] || null;
+  }
+  return null;
+}
+
+export function setEventHandlerListeners(
+  scope: EventTarget | ReactScopeInstance,
+  listeners: Set<ReactDOMEventHandleListener>,
+): void {
+  (scope: any)[internalEventHandlerListenersKey] = listeners;
+}
+
+export function getEventHandlerListeners(
+  scope: EventTarget | ReactScopeInstance,
+): null | Set<ReactDOMEventHandleListener> {
+  return (scope: any)[internalEventHandlerListenersKey] || null;
 }

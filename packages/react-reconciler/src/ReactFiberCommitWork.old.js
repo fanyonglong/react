@@ -36,6 +36,7 @@ import {
   enableSuspenseCallback,
   enableScopeAPI,
   runAllPassiveEffectDestroysBeforeCreates,
+  enableCreateEventHandleAPI,
 } from 'shared/ReactFeatureFlags';
 import {
   FunctionComponent,
@@ -110,8 +111,10 @@ import {
   updateFundamentalComponent,
   commitHydratedContainer,
   commitHydratedSuspenseInstance,
-  beforeRemoveInstance,
+  removeInstanceEventHandles,
   clearContainer,
+  prepareScopeUpdate,
+  removeScopeEventHandles,
 } from './ReactFiberHostConfig';
 import {
   captureCommitPhaseError,
@@ -888,7 +891,7 @@ function commitAttachRef(finishedWork: Fiber) {
     }
     // Moved outside to ensure DCE works with this flag
     if (enableScopeAPI && finishedWork.tag === ScopeComponent) {
-      instanceToUse = instance.methods;
+      instanceToUse = instance;
     }
     if (typeof ref === 'function') {
       ref(instanceToUse);
@@ -1025,7 +1028,9 @@ function commitUnmount(
       if (enableDeprecatedFlareAPI) {
         unmountDeprecatedResponderListeners(current);
       }
-      beforeRemoveInstance(current.stateNode);
+      if (enableCreateEventHandleAPI && current.ref !== null) {
+        removeInstanceEventHandles(current.stateNode);
+      }
       safelyDetachRef(current);
       return;
     }
@@ -1063,10 +1068,14 @@ function commitUnmount(
       return;
     }
     case ScopeComponent: {
-      if (enableDeprecatedFlareAPI) {
-        unmountDeprecatedResponderListeners(current);
-      }
       if (enableScopeAPI) {
+        if (enableDeprecatedFlareAPI) {
+          unmountDeprecatedResponderListeners(current);
+        }
+        const scopeInstance = current.stateNode;
+        if (enableCreateEventHandleAPI && current.ref !== null) {
+          removeScopeEventHandles(scopeInstance);
+        }
         safelyDetachRef(current);
       }
       return;
@@ -1715,7 +1724,6 @@ function commitWork(current: Fiber | null, finishedWork: Fiber): void {
     case ScopeComponent: {
       if (enableScopeAPI) {
         const scopeInstance = finishedWork.stateNode;
-        scopeInstance.fiber = finishedWork;
         if (enableDeprecatedFlareAPI) {
           const newProps = finishedWork.memoizedProps;
           const oldProps = current !== null ? current.memoizedProps : newProps;
@@ -1725,6 +1733,7 @@ function commitWork(current: Fiber | null, finishedWork: Fiber): void {
             updateDeprecatedEventListeners(nextListeners, finishedWork, null);
           }
         }
+        prepareScopeUpdate(scopeInstance, finishedWork);
         return;
       }
       break;
