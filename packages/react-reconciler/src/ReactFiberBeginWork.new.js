@@ -75,7 +75,6 @@ import {
   warnAboutDefaultPropsOnFunctionComponents,
   enableScopeAPI,
   enableBlocksAPI,
-  warnAboutDOMHiddenAttribute,
 } from 'shared/ReactFeatureFlags';
 import invariant from 'shared/invariant';
 import shallowEqual from 'shared/shallowEqual';
@@ -166,6 +165,7 @@ import {
   reenterHydrationStateFromDehydratedSuspenseInstance,
   resetHydrationState,
   tryToClaimNextHydratableInstance,
+  getIsHydrating,
   warnIfHydrating,
 } from './ReactFiberHydrationContext.new';
 import {
@@ -575,7 +575,13 @@ function updateOffscreenComponent(
       };
       workInProgress.memoizedState = nextState;
       pushRenderLanes(workInProgress, renderLanes);
-    } else if (!includesSomeLane(renderLanes, (OffscreenLane: Lane))) {
+    } else if (
+      !includesSomeLane(renderLanes, (OffscreenLane: Lane)) ||
+      // Server renderer does not render hidden subtrees, so if we're hydrating
+      // we should always bail out and schedule a subsequent render pass, to
+      // force a client render. Even if we're already at Offscreen priority.
+      (current === null && getIsHydrating())
+    ) {
       let nextBaseLanes;
       if (prevState !== null) {
         const prevBaseLanes = prevState.baseLanes;
@@ -1124,22 +1130,6 @@ function updateHostComponent(
   }
 
   markRef(current, workInProgress);
-
-  if (__DEV__) {
-    if (
-      warnAboutDOMHiddenAttribute &&
-      (workInProgress.mode & ConcurrentMode) !== NoMode &&
-      nextProps.hasOwnProperty('hidden')
-    ) {
-      // This warning will not be user visible. Only exists so React Core team
-      // can find existing callers and migrate them to the new API.
-      console.error(
-        'Detected use of DOM `hidden` attribute. Should migrate to new API. ' +
-          '(owner: React Core)',
-      );
-    }
-  }
-
   reconcileChildren(current, workInProgress, nextChildren, renderLanes);
   return workInProgress.child;
 }
