@@ -1643,13 +1643,14 @@ function completeUnitOfWork(unitOfWork: Fiber): void {
         stopProfilerTimerIfRunningAndRecordDelta(completedWork, false);
       }
       resetCurrentDebugFiberInDEV();
-      resetChildExpirationTime(completedWork);
 
       if (next !== null) {
         // Completing this fiber spawned new work. Work on that next.
         workInProgress = next;
         return;
       }
+
+      resetChildExpirationTime(completedWork);
 
       if (
         returnFiber !== null &&
@@ -1697,6 +1698,16 @@ function completeUnitOfWork(unitOfWork: Fiber): void {
 
       // Because this fiber did not complete, don't reset its expiration time.
 
+      if (next !== null) {
+        // If completing this work spawned new work, do that next. We'll come
+        // back here again.
+        // Since we're restarting, remove anything that is not a host effect
+        // from the effect tag.
+        next.effectTag &= HostEffectMask;
+        workInProgress = next;
+        return;
+      }
+
       if (
         enableProfilerTimer &&
         (completedWork.mode & ProfileMode) !== NoMode
@@ -1712,16 +1723,6 @@ function completeUnitOfWork(unitOfWork: Fiber): void {
           child = child.sibling;
         }
         completedWork.actualDuration = actualDuration;
-      }
-
-      if (next !== null) {
-        // If completing this work spawned new work, do that next. We'll come
-        // back here again.
-        // Since we're restarting, remove anything that is not a host effect
-        // from the effect tag.
-        next.effectTag &= HostEffectMask;
-        workInProgress = next;
-        return;
       }
 
       if (returnFiber !== null) {
@@ -1774,7 +1775,7 @@ function resetChildExpirationTime(completedWork: Fiber) {
     // In profiling mode, resetChildExpirationTime is also used to reset
     // profiler durations.
     let actualDuration = completedWork.actualDuration;
-    let treeBaseDuration = completedWork.selfBaseDuration;
+    let treeBaseDuration = ((completedWork.selfBaseDuration: any): number);
 
     // When a fiber is cloned, its actualDuration is reset to 0. This value will
     // only be updated if work is done on the fiber (i.e. it doesn't bailout).
@@ -1803,6 +1804,18 @@ function resetChildExpirationTime(completedWork: Fiber) {
       treeBaseDuration += child.treeBaseDuration;
       child = child.sibling;
     }
+
+    const isTimedOutSuspense =
+      completedWork.tag === SuspenseComponent &&
+      completedWork.memoizedState !== null;
+    if (isTimedOutSuspense) {
+      // Don't count time spent in a timed out Suspense subtree as part of the base duration.
+      const primaryChildFragment = completedWork.child;
+      if (primaryChildFragment !== null) {
+        treeBaseDuration -= ((primaryChildFragment.treeBaseDuration: any): number);
+      }
+    }
+
     completedWork.actualDuration = actualDuration;
     completedWork.treeBaseDuration = treeBaseDuration;
   } else {
